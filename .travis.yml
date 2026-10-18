@@ -1,3 +1,21 @@
 language: node_js
 node_js:
 - '0.10'
+# focal: a current headless Chrome and php-cli for the QUnit suite
+dist: focal
+addons:
+  chrome: stable
+  apt:
+    packages:
+    - php-cli
+before_script:
+# The QUnit page needs PHP for test/data/*.php (ajax tests); serve the repo root
+- PHP_CLI_SERVER_WORKERS=4 php -S localhost:8000 -t . > /tmp/php-server.log 2>&1 &
+- sleep 3
+script:
+# grunt: jsonlint, build dist/ (loaded by the test page), jshint, jscs, uglify
+- npm test
+# QUnit suite (test/index.html, all modules from test/data/testinit.js) in headless Chrome
+- nvm install 18
+- mkdir -p /tmp/runner && npm install --prefix /tmp/runner --no-save --no-package-lock --no-audit --no-fund puppeteer-core@21
+- NODE_PATH=/tmp/runner/node_modules node test/headless-runner.js

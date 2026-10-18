@@ -1,0 +1,129 @@
+name: pack
+
+# Builds and packs the npm tarball, then repeats the Travis QUnit run
+# (.travis.yml) against the freshly built dist/.
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "QUnit filter (substring of '<module>: <test name>'); empty runs the full suite"
+        required: false
+        default: ""
+
+jobs:
+  pack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # libfaketime pins the build clock to the 1.11.1 release commit time:
+      # the build stamps "Date: <now>" into dist/jquery.js and the year into
+      # the dist/jquery.min.js banner. jessie's packaged faketime (0.9.6)
+      # aborts node 0.10 (unsupported coarse clock ids), so build 0.9.10 from
+      # source inside the node:0.10 container (glibc 2.19).
+      - name: Fetch libfaketime source
+        run: curl -sSfL https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.10.tar.gz -o "$RUNNER_TEMP/libfaketime.tar.gz"
+
+      - name: Write build scripts
+        run: |
+          # Mirrors build/release.js makeReleaseCopies() (CDN copies, non-prerelease)
+          cat > "$RUNNER_TEMP/cdn-copies.js" <<'EOF'
+          var fs = require( "fs" ),
+            version = require( "/src/package.json" ).version,
+            cdnFolder = "dist/cdn",
+            releaseFiles = {
+              "jquery-VER.js": "dist/jquery.js",
+              "jquery-VER.min.js": "dist/jquery.min.js",
+              "jquery-VER.min.map": "dist/jquery.min.map",
+              "jquery.js": "dist/jquery.js",
+              "jquery.min.js": "dist/jquery.min.js",
+              "jquery.min.map": "dist/jquery.min.map",
+              "jquery-latest.js": "dist/jquery.js",
+              "jquery-latest.min.js": "dist/jquery.min.js",
+              "jquery-latest.min.map": "dist/jquery.min.map"
+            };
+          if ( !fs.existsSync( cdnFolder ) ) {
+            fs.mkdirSync( cdnFolder );
+          }
+          Object.keys( releaseFiles ).forEach(function( key ) {
+            var text,
+              builtFile = releaseFiles[ key ],
+              unpathedFile = key.replace( /VER/g, version ),
+              releaseFile = cdnFolder + "/" + unpathedFile;
+            if ( /\.map$/.test( releaseFile ) ) {
+              text = fs.readFileSync( builtFile, "utf8" )
+                .replace( /"file":"([^"]+)","sources":\["([^"]+)"\]/,
+                  "\"file\":\"" + unpathedFile.replace( /\.min\.map/, ".min.js" ) +
+                  "\",\"sources\":[\"" + unpathedFile.replace( /\.min\.map/, ".js" ) + "\"]" );
+              fs.writeFileSync( releaseFile, text );
+            } else if ( /\.min\.js$/.test( releaseFile ) ) {
+              text = fs.readFileSync( builtFile, "utf8" )
+                .replace( /\/\/# sourceMappingURL=\S+/, "" );
+              fs.writeFileSync( releaseFile, text );
+            } else {
+              fs.writeFileSync( releaseFile, fs.readFileSync( builtFile ) );
+            }
+            console.log( "cdn: " + releaseFile );
+          });
+          EOF
+          cat > "$RUNNER_TEMP/build.sh" <<'EOF'
+          set -eux
+          (cd /tmp && tar xzf /work/libfaketime.tar.gz && make -C libfaketime-0.9.10/src libfaketime.so.1)
+          cd /src
+          node -v
+          npm -v
+          npm config set registry "https://:2014-05-01T18%3A05%3A32.863Z@time-machines-npm.sealsecurity.io/"
+          npm install
+          # Release commit time; "@" starts the clock there and lets it run
+          TZ=UTC FAKETIME="@2014-05-01 17:42:00" LD_PRELOAD=/tmp/libfaketime-0.9.10/src/libfaketime.so.1 \
+            ./node_modules/.bin/grunt
+          head -n 14 dist/jquery.js
+          head -c 100 dist/jquery.min.js; echo
+          node /work/cdn-copies.js
+          # This workflow is not part of the public tarball and .npmignore
+          # (which ships) does not list .github: drop it from the CI checkout
+          rm -rf .github
+          npm pack
+          mkdir -p artifacts
+          mv jquery-1.11.1.tgz artifacts/
+          tar tzvf artifacts/jquery-1.11.1.tgz
+          EOF
+
+      - name: Build and pack in node:0.10
+        run: docker run --rm -v "$PWD":/src -v "$RUNNER_TEMP":/work -w /src node:0.10 sh /work/build.sh
+
+      # Same QUnit run as Travis; repeated here because the Travis API serves
+      # no job logs, so this is where the test count is visible. It runs
+      # test/index.html (all modules from test/data/testinit.js) in headless
+      # Chrome against the dist/ the docker build above just produced.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install QUnit runner deps
+        run: |
+          mkdir -p /tmp/runner
+          npm install --prefix /tmp/runner --no-save --no-package-lock --no-audit --no-fund puppeteer-core@21
+
+      - name: QUnit suite (headless Chrome)
+        run: |
+          ls -l dist/jquery.js dist/jquery.min.js test/index.html test/headless-runner.js
+          # The ajax tests need PHP (test/data/*.php): serve the repo root
+          PHP_CLI_SERVER_WORKERS=4 php -S localhost:8000 -t . > "$RUNNER_TEMP/php-server.log" 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null http://localhost:8000/test/index.html && break
+            sleep 1
+          done
+          url=http://localhost:8000/test/index.html
+          filter="${{ inputs.test-filter }}"
+          if [ -n "$filter" ]; then
+            url="$url?filter=$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$filter")"
+          fi
+          TEST_URL="$url" NODE_PATH=/tmp/runner/node_modules node test/headless-runner.js
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jquery-1.11.1
+          path: artifacts/jquery-1.11.1.tgz
+          if-no-files-found: error
