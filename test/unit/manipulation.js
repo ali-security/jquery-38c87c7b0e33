@@ -2488,3 +2488,63 @@ asyncTest( "Inline event handlers do not run via self-closing tag breakout (CVE-
 		equal( window.xssCVE202011022, false, "onerror handler of the injected <img> has not been called" );
 	}, 1000 );
 });
+
+test( "<option> and <optgroup> HTML is parsed the way a sanitizer parses it (CVE-2020-11023)", function() {
+	var i, html, expected,
+		sanitizer = document.createElement("div"),
+		payloads = [
+			"<option><style></option></select><img src=url404 onerror='jQuery.noop()'></style>",
+			"<optgroup><style></optgroup></select><img src=url404 onerror='jQuery.noop()'></style>",
+			"<option>a</option><input>"
+		];
+
+	expect( payloads.length * 4 );
+
+	// Support: IE<=9 only
+	// IE<=9 drops <option> tags parsed outside of a <select>,
+	// so jQuery still has to use a <select> wrapper there
+	sanitizer.innerHTML = "<option></option>";
+	if ( !sanitizer.lastChild ) {
+		for ( i = 0; i < payloads.length * 4; i++ ) {
+			ok( true, "<option> outside of <select> is not supported; skipping" );
+		}
+		return;
+	}
+
+	for ( i = 0; i < payloads.length; i++ ) {
+		html = payloads[ i ];
+
+		// Sanitizers (e.g. DOMPurify) inspect the markup as parsed in a <div>
+		sanitizer.innerHTML = html;
+		expected = sanitizer.innerHTML;
+
+		equal( jQuery("<div></div>").html( html ).html(), expected, "html(): " + html );
+		equal( jQuery("<div></div>").append( html ).html(), expected, "append(): " + html );
+		equal( jQuery("<div></div>").append( jQuery( html ) ).html(), expected, "jQuery(html): " + html );
+		equal( jQuery("<div></div>").append( jQuery.parseHTML( html ) ).html(), expected, "jQuery.parseHTML(): " + html );
+	}
+});
+
+asyncTest( "Sanitized <option> HTML does not run code via manipulation methods (CVE-2020-11023)", function() {
+	var fixture = jQuery("#qunit-fixture"),
+		option = "<option><style></option></select><img src=url404 onerror='xssCVE202011023 = true'></style>",
+		optgroup = "<optgroup><style></optgroup></select><img src=url404 onerror='xssCVE202011023 = true'></style>";
+
+	expect( 1 );
+
+	Globals.register("xssCVE202011023");
+	jQuery.globalEval("xssCVE202011023 = false;");
+
+	jQuery("<div></div>").appendTo( fixture ).html( option );
+	jQuery("<div></div>").appendTo( fixture ).html( optgroup );
+	jQuery("<div></div>").appendTo( fixture ).append( option ).prepend( optgroup );
+	jQuery("<span></span>").appendTo( fixture ).before( option ).after( optgroup );
+	jQuery("<span></span>").appendTo( fixture ).replaceWith( option );
+	jQuery( option );
+	jQuery( optgroup );
+
+	window.setTimeout(function() {
+		start();
+		equal( window.xssCVE202011023, false, "onerror handler of the injected <img> has not been called" );
+	}, 1000 );
+});
